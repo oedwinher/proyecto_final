@@ -1,5 +1,8 @@
 FROM python:3.12-slim
 
+LABEL org.opencontainers.image.source="https://github.com/oedwinher/proyecto_final"
+LABEL org.opencontainers.image.description="API FastAPI de Nowcasting Sectorial F104 (SRI -> IMAEC BCE)"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1

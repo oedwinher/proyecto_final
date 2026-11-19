@@ -1,0 +1,17 @@
+{
+  "run_id_champion": "b4bd242a500b42eea087a6cc9918097a",
+  "version_champion": "1",
+  "alias_champion": "champion",
+  "nombre_modelo": "nowcasting-f104-modelo",
+  "filas_holdout_completo": 828,
+  "mae_mlflow_holdout_completo": 14.79054602919891,
+  "wape_mlflow_holdout_completo_pct": 3.266517036661713,
+  "costo_negocio_mlflow_holdout_musd": 18.6305376113408,
+  "filas_muestra_fija": 100,
+  "mae_muestra_fija": 14.495367295112974,
+  "rmse_muestra_fija": 24.229134871197008,
+  "r2_muestra_fija": 0.9994271890704532,
+  "wape_muestra_fija_pct": 3.869080970569162,
+  "costo_negocio_muestra_fija_musd": 17.38121485523548,
+  "tolerancia_mae_musd": 0.0001
+}

@@ -1,0 +1,37 @@
+name: CI - Pruebas Automáticas y Build de API
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pruebas-y-build:
+    runs-on: ubuntu-latest
+    env:
+      MODEL_LOCAL_PATH: tests/fixtures/modelo_champion
+      GUARDAR_SNOWFLAKE: "false"
+      MODO_RESPALDO: "false"
+      TOKEN_ADMIN: token-prueba-ci
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias del proyecto
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Ejecutar suite de pruebas (Contrato, Modelo, Comportamiento y Respaldo)
+        run: pytest tests -v
+
+      - name: Construir imagen Docker del servicio FastAPI
+        run: docker build -f api/Dockerfile -t proyecto_final-api:ci .

@@ -1,0 +1,39 @@
+# Variables de entorno y credenciales
+.env
+.env.local
+
+# Entornos virtuales y cache de Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+
+# MLflow local storage y artefactos pesados
+mlruns/
+mlartifacts/
+mlflow_data/
+*.db
+*.sqlite
+
+# Snapshots y artefactos de datos locales
+data/*.parquet
+*.joblib
+logs/
+
+# dbt artefactos generados
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+
+# Sistema operativo e IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

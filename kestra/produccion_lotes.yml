@@ -1,0 +1,70 @@
+# Simulación de producción por lotes (Sección 5 del PSet #4).
+# Lee cada lote cronológico desde Snowflake, llama a la API FastAPI (/predecir_lote)
+# para registrar las predicciones en PSET2_DB.ANALYTICS.PREDICCIONES y, respetando
+# el horizonte de 30 días, une el target definitivo cuando ya está disponible.
+
+id: produccion_lotes
+namespace: ecuador.bce.coyuntura
+
+description: |
+  Simulación de producción lote a lote (12 períodos mensuales del hold-out 2025-01 a 2025-12,
+  incluyendo el Lote 10 con deriva inducida intencionalmente). Respeta el horizonte de predicción:
+  en el día 15 del mes t se emiten las predicciones del corte temprano y solo se evalúa el target
+  definitivo de los lotes cuyo cierre (+30 días) ya llegó.
+
+labels:
+  proyecto: nowcasting-ventas-sectoriales
+  fase: simulacion-produccion
+
+inputs:
+  - id: lote_id
+    type: STRING
+    displayName: Identificador del lote
+    defaults: "L01_202501"
+  - id: tiempo_key
+    type: INT
+    displayName: Clave temporal AAAAMM del lote
+    defaults: 202501
+  - id: inducir_deriva
+    type: BOOL
+    displayName: Inducir deriva intencional en el lote (choque SRI + precios)
+    defaults: false
+
+tasks:
+  - id: log_inicio_lote
+    type: io.kestra.plugin.core.log.Log
+    message: >-
+      Iniciando puntuación del lote {{ inputs.lote_id }} (tiempo_key={{ inputs.tiempo_key }},
+      inducir_deriva={{ inputs.inducir_deriva }}). Horizonte: target definitivo llega +30 días después.
+
+  - id: puntuar_lote_api
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    env:
+      SNOWFLAKE_ACCOUNT: "{{ envs.snowflake_account }}"
+      SNOWFLAKE_USER: "{{ envs.snowflake_user }}"
+      SNOWFLAKE_PASSWORD: "{{ envs.snowflake_password }}"
+      SNOWFLAKE_ROLE: "{{ envs.snowflake_role }}"
+      SNOWFLAKE_WAREHOUSE: "{{ envs.snowflake_warehouse }}"
+      SNOWFLAKE_DATABASE: "{{ envs.snowflake_database }}"
+      SNOWFLAKE_SCHEMA: "{{ envs.snowflake_schema }}"
+      API_URL: "{{ envs.api_url ?? 'http://api:8000' }}"
+      MLFLOW_TRACKING_URI: "{{ envs.mlflow_tracking_uri ?? 'http://mlflow:5000' }}"
+    commands:
+      - cd /workspace
+      - >-
+        python -m monitoreo.simular_produccion
+        --modo lote-unico
+        --lote-id "{{ inputs.lote_id }}"
+        --tiempo-key {{ inputs.tiempo_key }}
+        --inducir-deriva {{ inputs.inducir_deriva }}
+
+  - id: encadenar_monitoreo
+    type: io.kestra.plugin.core.flow.Subflow
+    namespace: ecuador.bce.coyuntura
+    flowId: monitoreo
+    inputs:
+      lote_id: "{{ inputs.lote_id }}"
+      tiempo_key: "{{ inputs.tiempo_key }}"
+    wait: true

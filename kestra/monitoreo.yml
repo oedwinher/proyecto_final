@@ -1,0 +1,53 @@
+# Monitoreo de sistema, modelo, calidad de datos, deriva (PSI/KS/Chi²) y alertas (Sección 6).
+# Se ejecuta después de cada lote, guarda resultados en PSET2_DB.ANALYTICS.MONITOREO y
+# PSET2_DB.ANALYTICS.ALERTAS, y dispara reentrenamiento.yml si cae el desempeño.
+
+id: monitoreo
+namespace: ecuador.bce.coyuntura
+
+description: |
+  Calcula lote por lote las métricas de sistema (latencia p50/p95, errores 4xx/5xx, volumen),
+  de modelo (distribución de predicciones, tasa de cada decisión, MAE, WAPE y Costo de Negocio
+  cuando llega el target), de calidad de datos y de deriva (PSI por feature, KS y Chi-cuadrado).
+  Persiste en PSET2_DB.ANALYTICS.MONITOREO y PSET2_DB.ANALYTICS.ALERTAS.
+
+labels:
+  proyecto: nowcasting-ventas-sectoriales
+  fase: monitoreo-y-alertas
+
+inputs:
+  - id: lote_id
+    type: STRING
+    defaults: "L10_202510_DERIVA"
+  - id: tiempo_key
+    type: INT
+    defaults: 202510
+
+tasks:
+  - id: calcular_monitoreo_y_alertas
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    env:
+      SNOWFLAKE_ACCOUNT: "{{ envs.snowflake_account }}"
+      SNOWFLAKE_USER: "{{ envs.snowflake_user }}"
+      SNOWFLAKE_PASSWORD: "{{ envs.snowflake_password }}"
+      SNOWFLAKE_ROLE: "{{ envs.snowflake_role }}"
+      SNOWFLAKE_WAREHOUSE: "{{ envs.snowflake_warehouse }}"
+      SNOWFLAKE_DATABASE: "{{ envs.snowflake_database }}"
+      SNOWFLAKE_SCHEMA: "{{ envs.snowflake_schema }}"
+      API_URL: "{{ envs.api_url ?? 'http://api:8000' }}"
+      MLFLOW_TRACKING_URI: "{{ envs.mlflow_tracking_uri ?? 'http://mlflow:5000' }}"
+    commands:
+      - cd /workspace
+      - >-
+        python -m monitoreo.simular_produccion
+        --modo evaluar-monitoreo
+        --lote-id "{{ inputs.lote_id }}"
+        --tiempo-key {{ inputs.tiempo_key }}
+
+  - id: log_resultado_monitoreo
+    type: io.kestra.plugin.core.log.Log
+    message: >-
+      Monitoreo completado para {{ inputs.lote_id }} ({{ inputs.tiempo_key }}).
+      Revisar tabla PSET2_DB.ANALYTICS.MONITOREO y PSET2_DB.ANALYTICS.ALERTAS.

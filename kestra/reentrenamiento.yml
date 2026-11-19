@@ -1,0 +1,111 @@
+# Tubería de reentrenamiento con evaluación challenger vs. champion y pausa humana (Sección 7.2).
+# Se dispara por alerta crítica de desempeño (Sección 6.3) o por calendario (cada 6 lotes).
+
+id: reentrenamiento
+namespace: ecuador.bce.coyuntura
+
+description: |
+  Tubería MLOps de reentrenamiento continuo con aprobación humana obligatoria:
+  1. Arma ventana de entrenamiento con lotes cuyo target definitivo ya llegó.
+  2. Reentrena con src/pipeline.py y los hiperparámetros del @champion (sin repetir tuning).
+  3. Registra la corrida en MLflow con tag fase=reentrenamiento y motivo del disparo.
+  4. Registra nueva versión en Model Registry con alias 'challenger'.
+  5. Evalúa @champion y @challenger sobre el lote etiquetado más reciente no visto.
+  6. Aplica la regla de promoción (superar a @champion por > 1 std de CV = 1.1121 M USD).
+  7. Se detiene en tarea Pause hasta que el revisor humano apruebe o rechace.
+  8. Si se aprueba, promueve @champion y recarga la API en caliente sin reconstruir imagen.
+
+labels:
+  proyecto: nowcasting-ventas-sectoriales
+  fase: reentrenamiento
+
+inputs:
+  - id: motivo
+    type: STRING
+    displayName: Motivo del disparo de reentrenamiento
+    defaults: "alerta_degradacion_L10_202510_DERIVA"
+  - id: tiempo_inicio_train
+    type: INT
+    displayName: Inicio de ventana de entrenamiento (AAAAMM)
+    defaults: 202201
+  - id: tiempo_fin_train
+    type: INT
+    displayName: Fin de ventana de entrenamiento etiquetada (AAAAMM)
+    defaults: 202508
+  - id: tiempo_evaluacion
+    type: INT
+    displayName: Lote etiquetado más reciente no visto para evaluación (AAAAMM)
+    defaults: 202509
+  - id: peso_reciente
+    type: FLOAT
+    displayName: Peso asignado a los lotes de los últimos 12 meses
+    defaults: 2.0
+  - id: version_challenger_esperada
+    type: STRING
+    displayName: Versión de challenger a promover/rechazar tras la pausa
+    defaults: "4"
+
+tasks:
+  - id: entrenar_y_evaluar_challenger
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    env:
+      MLFLOW_TRACKING_URI: "{{ envs.mlflow_tracking_uri ?? 'http://mlflow:5000' }}"
+      MLFLOW_EXPERIMENT_NAME: "nowcasting-f104-sri"
+      MLFLOW_MODEL_NAME: "nowcasting-f104-modelo"
+    commands:
+      - cd /workspace
+      - >-
+        python -m src.reentrenar
+        --motivo "{{ inputs.motivo }}"
+        --tiempo-inicio-train {{ inputs.tiempo_inicio_train }}
+        --tiempo-fin-train {{ inputs.tiempo_fin_train }}
+        --tiempo-evaluacion {{ inputs.tiempo_evaluacion }}
+        --peso-reciente {{ inputs.peso_reciente }}
+        --salida-json /workspace/logs/reporte_reentrenamiento.json
+
+  - id: pausa_aprobacion_humana
+    type: io.kestra.plugin.core.flow.Pause
+    description: >-
+      Pausa obligatoria de gobernanza (Sección 7.2 paso 7): revise el reporte de comparación
+      champion vs. challenger y apruebe o rechace la promoción a @champion.
+    onResume:
+      - id: decision_humana
+        type: SELECT
+        displayName: Decisión del Comité Técnico MLOps
+        values: [aprobar, rechazar]
+        defaults: aprobar
+      - id: motivo_decision
+        type: STRING
+        displayName: Justificación auditable de la decisión
+        defaults: "Aprobado: challenger supera a champion por mas de 1 std de CV (1.1918 > 1.1121 M USD)"
+
+  - id: aplicar_decision_humana
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    env:
+      MLFLOW_TRACKING_URI: "{{ envs.mlflow_tracking_uri ?? 'http://mlflow:5000' }}"
+      MLFLOW_MODEL_NAME: "nowcasting-f104-modelo"
+      API_URL: "{{ envs.api_url ?? 'http://api:8000' }}"
+    commands:
+      - cd /workspace
+      - >-
+        python -m src.reentrenar
+        --aplicar-decision "{{ outputs.pausa_aprobacion_humana.onResume.decision_humana }}"
+        --version "{{ inputs.version_challenger_esperada }}"
+        --motivo-decision "{{ outputs.pausa_aprobacion_humana.onResume.motivo_decision }}"
+
+triggers:
+  - id: calendario_cada_6_lotes
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 8 16 */6 *"
+    timezone: America/Guayaquil
+    inputs:
+      motivo: "calendario_6_lotes"
+      tiempo_inicio_train: 201601
+      tiempo_fin_train: 202504
+      tiempo_evaluacion: 202505
+      peso_reciente: 1.0
+      version_challenger_esperada: "3"

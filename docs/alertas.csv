@@ -1,0 +1,6 @@
+ID_ALERTA,TIMESTAMP_UTC,LOTE_ID,TIEMPO_KEY,METRICA,VALOR_OBSERVADO,UMBRAL,VENTA_EVALUACION,SEVERIDAD,QUIEN_LA_RECIBE,ACCION,DISPARA_REENTRENAMIENTO
+29cec66cdc194e94,2026-11-19T19:06:51Z,L10_202510_DERIVA,202510,PSI de INDICE_PRECIO_REAL,7.3498,>= 0.25,1 lote,Media,Analista de Precios / SCNC,Verificar choque inflacionario en índice sectorial CNT-46,False
+375c59605d1a4948,2026-11-19T19:06:51Z,L10_202510_DERIVA,202510,MAE del lote (degradación de desempeño),230.2252,> 16.14 M USD (MAE_CV + 2*std),1 lote crítico o 2 lotes consecutivos,Crítica,Comité Técnico MLOps / SCNC,Disparar flujo Kestra reentrenamiento.yml y evaluar challenger vs champion,True
+ff97dba637e64053,2026-11-19T19:06:51Z,L10_202510_DERIVA,202510,PSI de proyeccion_cobertura_12m,0.3358,>= 0.25,1 lote,Alta,Equipo de Datos / SCNC,Revisar fuente F104 SRI y evaluar reentrenamiento si cae el desempeño,False
+66e1b5854ff94d82,2026-11-19T19:07:01Z,L12_202512,202512,PSI de VENTAS_NOMINALES_USD,0.2694,>= 0.25,1 lote,Alta,Equipo de Datos / SCNC,Auditar cobertura del corte temprano día 15 en SRI,False
+f43c707c8b7946fc,2026-11-19T19:07:01Z,L12_202512,202512,PSI de proyeccion_cobertura_12m,0.3373,>= 0.25,1 lote,Alta,Equipo de Datos / SCNC,Revisar fuente F104 SRI y evaluar reentrenamiento si cae el desempeño,False

@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import os
 import sys
+import urllib.request
 import uuid
 from datetime import date, datetime
 
@@ -46,7 +48,12 @@ LOTE = 5000
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--csv", required=True, help="Ruta al CSV semilla del F104")
+    p.add_argument("--csv", required=True, help="Ruta al CSV semilla de respaldo del F104")
+    p.add_argument(
+        "--fuente-url",
+        default=os.environ.get("SRI_SOURCE_URL", ""),
+        help="URL externa HTTP/HTTPS o endpoint de datos abiertos del SRI (opcional; si vacio usa --csv)",
+    )
     p.add_argument("--modo", choices=["completa", "incremental"], default="completa")
     p.add_argument("--fecha-ref", default=None, help="Fecha de referencia ISO (trigger.date o execution.startDate)")
     p.add_argument("--reemplazar-raw", default="false", help="true -> TRUNCATE de RAW antes de cargar")
@@ -59,14 +66,32 @@ def mes_anterior(d: date, n: int) -> str:
     return f"{total // 12:04d}-{total % 12 + 1:02d}-01"
 
 
-def leer_csv(ruta: str) -> list[dict]:
-    with open(ruta, newline="", encoding="utf-8-sig") as f:
-        lector = csv.DictReader(f)
-        faltan = set(COLUMNAS_FUENTE) - set(lector.fieldnames or [])
-        if faltan:
-            raise SystemExit(f"El CSV no contiene las columnas esperadas: {sorted(faltan)}")
-        # Cadena vacia -> NULL (se preserva la ausencia original; no se imputa en RAW)
-        return [{c: (fila[c] if fila[c] != "" else None) for c in COLUMNAS_FUENTE} for fila in lector]
+def _parsear_stream_csv(stream_texto) -> list[dict]:
+    lector = csv.DictReader(stream_texto)
+    faltan = set(COLUMNAS_FUENTE) - set(lector.fieldnames or [])
+    if faltan:
+        raise SystemExit(f"La fuente F104 no contiene las columnas esperadas: {sorted(faltan)}")
+    # Cadena vacia -> NULL (se preserva la ausencia original; no se imputa en RAW)
+    return [{c: (fila[c] if fila[c] != "" else None) for c in COLUMNAS_FUENTE} for fila in lector]
+
+
+def leer_fuente_f104(ruta_csv: str, fuente_url: str = "") -> tuple[list[dict], str]:
+    """Extrae el F104 desde URL externa del SRI si se configura; si no, usa el CSV semilla reproducible."""
+    url_limpia = (fuente_url or "").strip()
+    if url_limpia.startswith(("http://", "https://")):
+        try:
+            print(f"[extraccion_sri] Descargando corte F104 desde endpoint externo: {url_limpia}")
+            req = urllib.request.Request(url_limpia, headers={"User-Agent": "BCE-Nowcasting-Kestra/2.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                contenido = resp.read().decode("utf-8-sig")
+            return _parsear_stream_csv(io.StringIO(contenido)), url_limpia
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[WARN] No fue posible extraer de {url_limpia} ({exc}); "
+                f"activando respaldo reproducible local: {ruta_csv}"
+            )
+    with open(ruta_csv, newline="", encoding="utf-8-sig") as f:
+        return _parsear_stream_csv(f), os.path.basename(ruta_csv)
 
 
 def conectar() -> snowflake.connector.SnowflakeConnection:
@@ -90,19 +115,18 @@ def main() -> None:
     ref_txt = (args.fecha_ref or datetime.utcnow().isoformat())[:10]
     ref = date.fromisoformat(ref_txt)
 
-    filas = leer_csv(args.csv)
+    filas, origen = leer_fuente_f104(args.csv, args.fuente_url)
     total_fuente = len(filas)
     if args.modo == "incremental":
         meses = {mes_anterior(ref, 1), mes_anterior(ref, 2)}
         filas = [f for f in filas if f["mes_fiscal_id"] in meses]
         print(f"[incremental] fecha_ref={ref} -> meses fiscales objetivo: {sorted(meses)}")
-    print(f"Filas en fuente: {total_fuente} | filas a cargar: {len(filas)}")
+    print(f"Origen: {origen} | Filas en fuente: {total_fuente} | filas a cargar: {len(filas)}")
     if not filas:
         print("No hay filas para el periodo solicitado; nada que cargar (la ejecucion es valida).")
         return
 
     batch_id = str(uuid.uuid4())
-    origen = os.path.basename(args.csv)
     con = conectar()
     cur = con.cursor()
     try:

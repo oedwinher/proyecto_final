@@ -1,20 +1,22 @@
-# Ingesta F104 (SRI) -> PSET2_DB.RAW.RAW_F104_VENTAS en Snowflake.
-# Archivo oficial PSet #4: kestra/ingesta.yml (migrado de f104_to_snowflake_raw.yml del PSet #2).
+# Pipeline completo de Datos en Kestra (Cierre de Observaciones PSet #2):
+# 1. Extraccion F104 (endpoint externo SRI o semilla reproducible) -> PSET2_DB.RAW.RAW_F104_VENTAS
+# 2. Transformacion y validacion con dbt Core (Bronze -> Silver -> Gold Star Schema + 53 tests)
+# 3. Construccion distribuida de la OBT con PySpark -> PSET2_DB.ANALYTICS.OBT_NOWCASTING_VENTAS
 
 id: ingesta
 namespace: ecuador.bce.coyuntura
 
 description: |
-  Carga cruda del Formulario 104 (ventas por 46 ramas CIIU, cortes temprano_15d y definitivo)
-  hacia Snowflake (RAW). Mensual, dia 15 a las 06:00 (America/Guayaquil).
-  Soporta backfill historico: cada ejecucion usa trigger.date (o execution.startDate si es manual)
-  como fecha de referencia para decidir que meses fiscales cargar.
+  Orquestacion end-to-end de la capa de datos del Formulario 104 (46 ramas CIIU, cortes temprano_15d
+  y definitivo): extrae desde endpoint externo del SRI (o semilla de respaldo reproducible),
+  carga RAW en Snowflake (append-only), ejecuta dbt build (6 modelos y 53 pruebas en Bronze,
+  Silver y Gold Star Schema) y lanza el job de PySpark que construye ANALYTICS.OBT_NOWCASTING_VENTAS.
+  Mensual, dia 15 a las 06:00 (America/Guayaquil), con politica de reintentos y soporte de backfill.
 
 labels:
   proyecto: nowcasting-ventas-sectoriales
-  capa: raw
+  capa: datos-end-to-end
 
-# Un backfill lanza muchas ejecuciones: se procesan de una en una para no saturar Snowflake.
 concurrency:
   limit: 1
   behavior: QUEUE
@@ -29,11 +31,15 @@ inputs:
     type: BOOL
     displayName: Truncar RAW antes de cargar
     defaults: false
+  - id: fuente_url
+    type: STRING
+    displayName: URL externa del SRI (opcional; si vacio usa semilla reproducible f104_ventas_46_ramas.csv)
+    defaults: ""
 
 tasks:
   - id: log_periodo
     type: io.kestra.plugin.core.log.Log
-    message: "Procesando datos para {{ trigger.date ?? execution.startDate }} (modo={{ inputs.modo }})"
+    message: "Iniciando pipeline F104 (RAW -> dbt -> Spark OBT) para {{ trigger.date ?? execution.startDate }} (modo={{ inputs.modo }})"
 
   - id: cargar_raw
     type: io.kestra.plugin.scripts.shell.Commands
@@ -52,7 +58,6 @@ tasks:
       SNOWFLAKE_ROLE: "{{ envs.snowflake_role }}"
       SNOWFLAKE_WAREHOUSE: "{{ envs.snowflake_warehouse }}"
       SNOWFLAKE_DATABASE: "{{ envs.snowflake_database }}"
-    # Politica de reintentos: fallas transitorias de red/warehouse de Snowflake.
     retry:
       type: constant
       maxAttempts: 3
@@ -63,15 +68,69 @@ tasks:
       - >-
         python load_raw_f104.py
         --csv f104_ventas_46_ramas.csv
+        --fuente-url "{{ inputs.fuente_url }}"
         --modo "{{ inputs.modo }}"
         --reemplazar-raw "{{ inputs.reemplazar_raw }}"
         --fecha-ref "{{ trigger.date ?? execution.startDate }}"
+
+  - id: transformar_y_validar_dbt
+    type: io.kestra.plugin.scripts.shell.Commands
+    description: "Automatiza dbt run + dbt test (6 modelos Medallion y 53 pruebas de integridad en Bronze, Silver y Gold Star Schema)."
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    env:
+      SNOWFLAKE_ACCOUNT: "{{ envs.snowflake_account }}"
+      SNOWFLAKE_USER: "{{ envs.snowflake_user }}"
+      SNOWFLAKE_PASSWORD: "{{ envs.snowflake_password }}"
+      SNOWFLAKE_ROLE: "{{ envs.snowflake_role }}"
+      SNOWFLAKE_WAREHOUSE: "{{ envs.snowflake_warehouse }}"
+      SNOWFLAKE_DATABASE: "{{ envs.snowflake_database }}"
+      DBT_PROFILES_DIR: /workspace/dbt
+    retry:
+      type: constant
+      maxAttempts: 2
+      interval: PT15S
+    commands:
+      - >-
+        docker run --rm --network proyecto_final_nowcasting_net
+        -e SNOWFLAKE_ACCOUNT -e SNOWFLAKE_USER -e SNOWFLAKE_PASSWORD
+        -e SNOWFLAKE_ROLE -e SNOWFLAKE_WAREHOUSE -e SNOWFLAKE_DATABASE
+        -e DBT_PROFILES_DIR=/usr/app
+        -v /workspace/dbt:/usr/app -w /usr/app
+        ghcr.io/dbt-labs/dbt-snowflake:1.9.latest build
+
+  - id: construir_obt_spark
+    type: io.kestra.plugin.scripts.shell.Commands
+    description: "Automatiza el job distribuido PySpark (spark/build_obt.py) hacia PSET2_DB.ANALYTICS.OBT_NOWCASTING_VENTAS (12,635 filas x 38 columnas)."
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    env:
+      SNOWFLAKE_ACCOUNT: "{{ envs.snowflake_account }}"
+      SNOWFLAKE_USER: "{{ envs.snowflake_user }}"
+      SNOWFLAKE_PASSWORD: "{{ envs.snowflake_password }}"
+      SNOWFLAKE_ROLE: "{{ envs.snowflake_role }}"
+      SNOWFLAKE_WAREHOUSE: "{{ envs.snowflake_warehouse }}"
+      SNOWFLAKE_DATABASE: "{{ envs.snowflake_database }}"
+    retry:
+      type: constant
+      maxAttempts: 2
+      interval: PT15S
+    commands:
+      - >-
+        docker exec
+        -e SNOWFLAKE_ACCOUNT -e SNOWFLAKE_USER -e SNOWFLAKE_PASSWORD
+        -e SNOWFLAKE_ROLE -e SNOWFLAKE_WAREHOUSE -e SNOWFLAKE_DATABASE
+        spark-master /opt/spark/bin/spark-submit
+        --master spark://spark-master:7077
+        --conf spark.jars.ivy=/tmp/.ivy2
+        --packages net.snowflake:spark-snowflake_2.12:3.2.3-spark_3.5
+        /opt/spark-apps/build_obt.py
 
 errors:
   - id: log_error
     type: io.kestra.plugin.core.log.Log
     level: ERROR
-    message: "Fallo la ingesta F104 para {{ trigger.date ?? execution.startDate }} tras los reintentos."
+    message: "Fallo el pipeline F104 (RAW -> dbt -> Spark OBT) para {{ trigger.date ?? execution.startDate }} tras los reintentos."
 
 triggers:
   - id: mensual_dia_15
@@ -81,8 +140,4 @@ triggers:
     inputs:
       modo: incremental
       reemplazar_raw: false
-    # Backfill historico: desde la UI de Kestra (Triggers -> Backfill executions) elige un rango de
-    # fechas y cada ejecucion recibira su propia trigger.date. Para backfill automatico al
-    # desplegar, descomenta:
-    # backfill:
-    #   start: 2015-02-15T06:00:00-05:00
+      fuente_url: ""

@@ -10,16 +10,19 @@ Sistema MLOps *end-to-end* reproducible (integración de los **PSets #1, #2, #3 
 
 ```text
 proyecto_final/
-├── docker-compose.yml                  # Orquestación unificada: Postgres, Kestra, Spark, MLflow, API, Tablero, dbt
-├── .env.example                        # Plantilla documentada de variables de entorno (Snowflake, Kestra, MLflow, API)
+├── docker-compose.yml                  # Orquestación unificada: Postgres (Kestra+MLflow), Kestra, Spark, MLflow, API, Tablero, dbt
+├── .env.example                        # Plantilla documentada de variables de entorno (Snowflake, Kestra, MLflow SQLite/Postgres, API)
 ├── requirements.txt                    # Dependencias fijadas y probadas en Python 3.12 (scikit-learn==1.6.1, mlflow==2.17.2)
 ├── README.md                           # Guía reproducible desde cero (Fuente -> Raw -> Bronze/Silver/Gold -> OBT -> MLOps)
+├── infra/
+│   └── postgres-init/
+│       └── create_mlflow_db.sql        # Inicialización automática de base de datos PostgreSQL compartida para MLflow
 ├── .github/
 │   └── workflows/
 │       ├── ci.yml                      # Integración continua: pytest (14 pruebas) + docker build en cada push/PR
 │       └── cd.yml                      # Despliegue continuo: publicación de imagen en GHCR (sha + latest) en merge a main
 ├── kestra/
-│   ├── ingesta.yml                     # Flujo Raw: carga F104 (cron 0 6 15 * *, retries=3, soporte backfill histórico)
+│   ├── ingesta.yml                     # Pipeline Datos: Extracción F104 (URL SRI o semilla) -> RAW -> dbt (53 tests) -> Spark OBT
 │   ├── produccion_lotes.yml            # Simulación de producción lote a lote respetando el horizonte de +30 días
 │   ├── monitoreo.yml                   # Cálculo de métricas de sistema/modelo/datos, deriva (PSI/KS/Chi²) y alertas
 │   ├── reentrenamiento.yml             # Reentrenamiento con MLflow, comparación challenger vs champion y tarea Pause humana
@@ -96,6 +99,10 @@ proyecto_final/
    MLFLOW_EXPERIMENT_NAME=nowcasting-f104-sri
    MLFLOW_MODEL_NAME=nowcasting-f104-modelo
    MLFLOW_MODEL_ALIAS=champion
+   # Por defecto carga el snapshot local reproducible (107 corridas); para backend compartido PostgreSQL:
+   # MLFLOW_BACKEND_STORE_URI=postgresql+psycopg2://kestra:k3str4@postgres:5432/mlflow
+   MLFLOW_BACKEND_STORE_URI=sqlite:////mlflow/mlflow.db
+   SRI_SOURCE_URL=
    API_PORT=8000
    TABLERO_PORT=8501
    MODO_RESPALDO=false
@@ -127,20 +134,20 @@ Servicios disponibles en la red `nowcasting_net`:
 * **API FastAPI de Inferencia (`/docs`):** `http://localhost:8000/docs`
 * **Tablero Interactivo Streamlit:** `http://localhost:8501`
 
-### Paso 2: Fuente $\rightarrow$ Raw (Ingesta en Kestra)
-Desplegar y ejecutar el flujo `kestra/ingesta.yml` (`namespace: ecuador.bce.coyuntura`, `id: ingesta`), que ejecuta `kestra/scripts/load_raw_f104.py` sobre `data/seed/f104_ventas_46_ramas.csv` con política de reintentos (`maxAttempts: 3`) y soporte de *backfill*, poblando `PSET2_DB.RAW.RAW_F104_VENTAS` (`25,822` filas):
+### Paso 2: Fuente $\rightarrow$ Raw $\rightarrow$ dbt $\rightarrow$ Spark OBT (Orquestación Completa en Kestra)
+Desplegar y ejecutar el flujo `kestra/ingesta.yml` (`namespace: ecuador.bce.coyuntura`, `id: ingesta`), que extrae el Formulario 104 desde un endpoint externo del SRI (`fuente_url` / `SRI_SOURCE_URL`) o desde `data/seed/f104_ventas_46_ramas.csv` como semilla reproducible con política de reintentos (`maxAttempts: 3`) y soporte de *backfill*, poblando `PSET2_DB.RAW.RAW_F104_VENTAS` (`25,822` filas) y encadenando automáticamente las tareas `transformar_y_validar_dbt` (`dbt build`) y `construir_obt_spark` (`spark-submit`):
 ```bash
 curl -u admin@kestra.io:Admin1234 -X POST http://localhost:8080/api/v1/main/executions/ecuador.bce.coyuntura/ingesta
 ```
 
-### Paso 3: Raw $\rightarrow$ Bronze $\rightarrow$ Silver $\rightarrow$ Gold (dbt Core en Snowflake)
-Ejecutar los 6 modelos y las 53 pruebas de integridad de `dbt/` (`BRONZE.STG_F104_VENTAS` con `12,911` filas $\rightarrow$ `SILVER.INT_F104_VENTAS_LIMPIAS` con `12,911` filas $\rightarrow$ Star Schema en `GOLD`: `FCT_VENTAS_MENSUALES` con `12,635` filas de las 46 ramas oficiales tras filtrar las `276` filas sin clasificar `'000'`, `DIM_INDUSTRIA` con `46` filas, `DIM_TIEMPO` con `138` filas y `DIM_CORTE` con `2` filas):
+### Paso 3: Ejecución Manual Bajo Demanda de dbt Core (Raw $\rightarrow$ Bronze $\rightarrow$ Silver $\rightarrow$ Gold)
+También es posible ejecutar de forma independiente los 6 modelos y las 53 pruebas de integridad de `dbt/` (`BRONZE.STG_F104_VENTAS` con `12,911` filas $\rightarrow$ `SILVER.INT_F104_VENTAS_LIMPIAS` con `12,911` filas $\rightarrow$ Star Schema en `GOLD`: `FCT_VENTAS_MENSUALES` con `12,635` filas de las 46 ramas oficiales tras filtrar las `276` filas sin clasificar `'000'`, `DIM_INDUSTRIA` con `46` filas, `DIM_TIEMPO` con `138` filas y `DIM_CORTE` con `2` filas):
 ```bash
 docker compose --profile jobs run --rm dbt build
 ```
 
-### Paso 4: Gold $\rightarrow$ OBT (Cluster Apache Spark)
-Enviar el job PySpark `spark/build_obt.py` al clúster `spark://spark-master:7077` para desnormalizar el Star Schema y construir `PSET2_DB.ANALYTICS.OBT_NOWCASTING_VENTAS` (`12,635` filas × `38` columnas):
+### Paso 4: Ejecución Manual Bajo Demanda de Apache Spark (Gold $\rightarrow$ OBT)
+Enviar bajo demanda el job PySpark `spark/build_obt.py` al clúster `spark://spark-master:7077` para desnormalizar el Star Schema y construir `PSET2_DB.ANALYTICS.OBT_NOWCASTING_VENTAS` (`12,635` filas × `38` columnas):
 ```bash
 docker compose --profile jobs run --rm spark-submit
 ```
